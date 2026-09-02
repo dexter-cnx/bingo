@@ -3,9 +3,11 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../domain/bingo_board.dart';
 import '../domain/bingo_protocol.dart';
+import '../services/app_permissions.dart';
 import '../services/ggwave_service.dart';
 
 class PlayerPage extends StatefulWidget {
@@ -142,6 +144,46 @@ class _PlayerPageState extends State<PlayerPage> {
     if (mounted) setState(() => scanning = false);
   }
 
+  Future<void> _openScanner() async {
+    final result = await AppPermissions.requestCamera();
+    if (!mounted) return;
+    if (result == AppPermissionResult.granted) {
+      setState(() => scanning = true);
+      return;
+    }
+
+    final permanentlyDenied = result == AppPermissionResult.permanentlyDenied;
+    setState(() {
+      log = permanentlyDenied
+          ? 'Camera ถูกปิดถาวร กรุณาเปิดใน Settings เพื่อใช้ QR fallback'
+          : 'ไม่ได้รับสิทธิ์ Camera — acoustic receive ยังใช้งานต่อได้';
+    });
+    if (!permanentlyDenied) return;
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('ต้องใช้ Camera สำหรับ QR'),
+        content: const Text(
+          'QR เป็น fallback เท่านั้น คุณยังเล่นผ่าน acoustic ได้ หรือเปิด Camera ใน Settings แล้วกลับมาสแกนอีกครั้ง',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('ปิด'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await openAppSettings();
+            },
+            child: const Text('เปิด Settings'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _changeProtocol(Protocol? value) async {
     if (value == null || value == proto) return;
     setState(() => proto = value);
@@ -170,7 +212,7 @@ class _PlayerPageState extends State<PlayerPage> {
         actions: [
           IconButton(
             tooltip: 'Scan QR fallback',
-            onPressed: () => setState(() => scanning = !scanning),
+            onPressed: scanning ? () => setState(() => scanning = false) : _openScanner,
             icon: const Icon(Icons.qr_code_scanner),
           ),
         ],
@@ -260,7 +302,7 @@ class _PlayerPageState extends State<PlayerPage> {
                   ),
                 const SizedBox(height: 8),
                 OutlinedButton.icon(
-                  onPressed: () => setState(() => scanning = true),
+                  onPressed: _openScanner,
                   icon: const Icon(Icons.qr_code_scanner),
                   label: const Text('สแกน QR Fallback'),
                 ),

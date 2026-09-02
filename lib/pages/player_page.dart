@@ -1,10 +1,13 @@
 import 'dart:async';
-import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:permission_handler/permission_handler.dart';
 
+import '../domain/bingo_board.dart';
+import '../domain/bingo_protocol.dart';
+import '../services/app_permissions.dart';
 import '../services/ggwave_service.dart';
 
 class PlayerPage extends StatefulWidget {
@@ -18,9 +21,8 @@ class PlayerPage extends StatefulWidget {
 }
 
 class _PlayerPageState extends State<PlayerPage> {
-  late List<List<int?>> board;
-  late List<List<bool>> marked;
-  final Set<int> seenSeq = <int>{};
+  late BingoBoard board;
+  late BingoEventGate gate;
   StreamSubscription<Uint8List>? _sub;
 
   String log = 'กำลังเตรียมรับเสียง…';
@@ -36,23 +38,14 @@ class _PlayerPageState extends State<PlayerPage> {
   void initState() {
     super.initState();
     curGid = widget.gameId;
-    _gen();
+    gate = BingoEventGate(curGid);
+    _generateBoard();
     _start();
   }
 
-  void _gen() {
-    final random = Random(curGid * 1000 + widget.playerId);
-    final nums = List<int>.generate(75, (i) => i + 1)..shuffle(random);
-    final picked = nums.take(24).toList();
-    var cursor = 0;
-    board = List.generate(5, (r) => List.generate(5, (c) {
-      if (r == 2 && c == 2) return null;
-      return picked[cursor++];
-    }));
-    marked = List.generate(5, (_) => List<bool>.filled(5, false));
-    marked[2][2] = true;
+  void _generateBoard() {
+    board = BingoBoard.generate(gameId: curGid, playerId: widget.playerId);
     won = false;
-    seenSeq.clear();
   }
 
   Future<void> _start() async {
@@ -61,8 +54,11 @@ class _PlayerPageState extends State<PlayerPage> {
       if (proto.isUltrasonic) await GgwaveService.setUltrasonicFreq(freq);
       await GgwaveService.startListening(proto);
       _sub = GgwaveService.onMessage.listen((payload) {
-        if (payload.length < 3 || payload[0] != (curGid & 0xFF)) return;
-        _handle(payload[1], payload[2]);
+        final result = gate.accept(
+          BingoProtocolCodec.decodeAudio(payload),
+          source: BingoTransportSource.audio,
+        );
+        _applyIngress(result);
       });
       if (mounted) setState(() => log = 'Listening • ${proto.label}');
     } catch (e) {
@@ -70,55 +66,51 @@ class _PlayerPageState extends State<PlayerPage> {
     }
   }
 
-  void _handle(int num, int incomingSeq) {
-    if (incomingSeq != 0 && !seenSeq.add(incomingSeq)) return;
-    if (seenSeq.length > 220) seenSeq.clear();
-    seq = incomingSeq;
-    if (num == 0) {
-      setState(() => log = 'เกมจบแล้ว');
+  void _applyIngress(BingoIngressResult result) {
+    if (!mounted) return;
+    if (!result.accepted) {
+      if (result.decision == BingoIngressDecision.wrongGame) {
+        setState(() => log = 'ละเว้น packet จาก game อื่น');
+      }
       return;
     }
-    if (num == 0xFF) return;
-    if (num >= 1 && num <= 75) _mark(num);
+    final event = result.event!;
+    switch (event.type) {
+      case BingoEventType.number:
+        seq = event.sequence!;
+        _mark(event.number!);
+        break;
+      case BingoEventType.end:
+        seq = event.sequence!;
+        setState(() => log = 'เกมจบแล้ว');
+        break;
+      case BingoEventType.join:
+      case BingoEventType.winner:
+        break;
+    }
   }
 
-  void _mark(int num) {
-    var changed = false;
-    for (var r = 0; r < 5; r++) {
-      for (var c = 0; c < 5; c++) {
-        if (board[r][c] == num && !marked[r][c]) {
-          marked[r][c] = true;
-          changed = true;
-        }
-      }
-    }
+  void _mark(int number) {
+    final changed = board.mark(number);
     if (!changed) {
-      setState(() => log = 'ได้เลข $num • ไม่มีบนการ์ด');
+      setState(() => log = 'ได้เลข $number • ไม่มีบนการ์ด');
       return;
     }
-    final hasWon = _win();
+    final hasWon = board.hasBingo;
     setState(() {
       won = won || hasWon;
-      log = hasWon ? 'BINGO! ได้เลข $num' : 'มาร์กเลข $num • seq $seq';
+      log = hasWon ? 'BINGO! ได้เลข $number' : 'มาร์กเลข $number • seq $seq';
     });
-  }
-
-  bool _win() {
-    for (var r = 0; r < 5; r++) {
-      if (marked[r].every((v) => v)) return true;
-    }
-    for (var c = 0; c < 5; c++) {
-      if (List.generate(5, (r) => marked[r][c]).every((v) => v)) return true;
-    }
-    if (List.generate(5, (i) => marked[i][i]).every((v) => v)) return true;
-    if (List.generate(5, (i) => marked[i][4 - i]).every((v) => v)) return true;
-    return false;
   }
 
   Future<void> sendWin() async {
     try {
-      final payload = BingoProto.makeWin(curGid, widget.playerId, seq);
-      final wave = await GgwaveService.encode(payload, p: proto, vol: proto.isUltrasonic ? 85 : 60);
+      final payload = BingoProtocolCodec.encodeWinner(curGid, widget.playerId);
+      final wave = await GgwaveService.encode(
+        payload,
+        p: proto,
+        vol: proto.isUltrasonic ? 85 : 60,
+      );
       await GgwaveService.play(wave);
       if (mounted) setState(() => log = 'ส่ง BINGO ไป Caller แล้ว');
     } catch (e) {
@@ -127,16 +119,17 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   void _onQr(String raw) {
-    final msg = BingoProto.parseQr(raw);
-    if (msg == null) {
+    final event = BingoProtocolCodec.decodeQr(raw);
+    if (event == null) {
       setState(() => log = 'QR ไม่ถูกต้อง');
       return;
     }
-    if (msg.type == QrMessageType.join) {
+    if (event.type == BingoEventType.join) {
       setState(() {
-        if (msg.gid != curGid) {
-          curGid = msg.gid;
-          _gen();
+        if (event.gameId != curGid) {
+          curGid = event.gameId;
+          gate.reset(curGid);
+          _generateBoard();
           log = 'เข้าร่วม Game $curGid จาก QR JOIN';
         } else {
           log = 'อยู่ใน Game $curGid แล้ว';
@@ -145,12 +138,50 @@ class _PlayerPageState extends State<PlayerPage> {
       });
       return;
     }
-    if (msg.type == QrMessageType.number && msg.gid == curGid) {
-      _handle(msg.number!, msg.seq! & 0xFF);
-      setState(() => scanning = false);
-    } else {
-      setState(() => log = 'QR เป็น Game ${msg.gid}, แต่ตอนนี้อยู่ Game $curGid');
+
+    final result = gate.accept(event, source: BingoTransportSource.qr);
+    _applyIngress(result);
+    if (mounted) setState(() => scanning = false);
+  }
+
+  Future<void> _openScanner() async {
+    final result = await AppPermissions.requestCamera();
+    if (!mounted) return;
+    if (result == AppPermissionResult.granted) {
+      setState(() => scanning = true);
+      return;
     }
+
+    final permanentlyDenied = result == AppPermissionResult.permanentlyDenied;
+    setState(() {
+      log = permanentlyDenied
+          ? 'Camera ถูกปิดถาวร กรุณาเปิดใน Settings เพื่อใช้ QR fallback'
+          : 'ไม่ได้รับสิทธิ์ Camera — acoustic receive ยังใช้งานต่อได้';
+    });
+    if (!permanentlyDenied) return;
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('ต้องใช้ Camera สำหรับ QR'),
+        content: const Text(
+          'QR เป็น fallback เท่านั้น คุณยังเล่นผ่าน acoustic ได้ หรือเปิด Camera ใน Settings แล้วกลับมาสแกนอีกครั้ง',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('ปิด'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await openAppSettings();
+            },
+            child: const Text('เปิด Settings'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _changeProtocol(Protocol? value) async {
@@ -178,7 +209,13 @@ class _PlayerPageState extends State<PlayerPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text('Player ${widget.playerId} • Game $curGid'),
-        actions: [IconButton(tooltip: 'Scan QR fallback', onPressed: () => setState(() => scanning = !scanning), icon: const Icon(Icons.qr_code_scanner))],
+        actions: [
+          IconButton(
+            tooltip: 'Scan QR fallback',
+            onPressed: scanning ? () => setState(() => scanning = false) : _openScanner,
+            icon: const Icon(Icons.qr_code_scanner),
+          ),
+        ],
       ),
       body: Stack(
         children: [
@@ -187,37 +224,88 @@ class _PlayerPageState extends State<PlayerPage> {
             child: Column(
               children: [
                 DropdownButtonFormField<Protocol>(
-                  value: proto,
+                  initialValue: proto,
                   isExpanded: true,
-                  decoration: const InputDecoration(labelText: 'Protocol', border: OutlineInputBorder()),
-                  items: Protocol.values.map((p) => DropdownMenuItem(value: p, child: Text(p.label))).toList(),
+                  decoration: const InputDecoration(
+                    labelText: 'Protocol',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: Protocol.values
+                      .map(
+                        (p) => DropdownMenuItem(
+                          value: p,
+                          child: Text(p.label),
+                        ),
+                      )
+                      .toList(),
                   onChanged: _changeProtocol,
                 ),
                 if (proto.isUltrasonic) ...[
                   const SizedBox(height: 8),
                   Text('${freq.toStringAsFixed(0)} Hz'),
-                  Slider(min: 8000, max: 19000, divisions: 110, value: freq, onChanged: (v) => setState(() => freq = v), onChangeEnd: (v) => GgwaveService.setUltrasonicFreq(v)),
+                  Slider(
+                    min: 8000,
+                    max: 19000,
+                    divisions: 110,
+                    value: freq,
+                    onChanged: (value) => setState(() => freq = value),
+                    onChangeEnd: GgwaveService.setUltrasonicFreq,
+                  ),
+                  Wrap(
+                    spacing: 8,
+                    children: [12000.0, 15000.0, 18000.0]
+                        .map(
+                          (value) => ActionChip(
+                            label: Text('${(value / 1000).toStringAsFixed(0)} kHz'),
+                            onPressed: () {
+                              setState(() => freq = value);
+                              GgwaveService.setUltrasonicFreq(value);
+                            },
+                          ),
+                        )
+                        .toList(),
+                  ),
                 ],
                 Align(alignment: Alignment.centerLeft, child: Text(log)),
                 const SizedBox(height: 8),
                 Expanded(
                   child: GridView.builder(
-                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 5, mainAxisSpacing: 5, crossAxisSpacing: 5),
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 5,
+                      mainAxisSpacing: 5,
+                      crossAxisSpacing: 5,
+                    ),
                     itemCount: 25,
                     itemBuilder: (context, index) {
-                      final r = index ~/ 5;
-                      final c = index % 5;
-                      final value = board[r][c];
+                      final row = index ~/ 5;
+                      final column = index % 5;
+                      final value = board.cells[row][column];
                       return Card(
-                        color: marked[r][c] ? Colors.green.shade200 : null,
-                        child: Center(child: Text(value?.toString() ?? 'FREE', style: const TextStyle(fontWeight: FontWeight.bold))),
+                        color: board.marked[row][column]
+                            ? Colors.green.shade200
+                            : null,
+                        child: Center(
+                          child: Text(
+                            value?.toString() ?? 'FREE',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ),
                       );
                     },
                   ),
                 ),
-                if (won) FilledButton.icon(onPressed: sendWin, icon: const Icon(Icons.emoji_events), label: Text('BINGO via ${proto.label}')),
+                if (won)
+                  FilledButton.icon(
+                    onPressed: sendWin,
+                    icon: const Icon(Icons.emoji_events),
+                    label: Text('BINGO via ${proto.label}'),
+                  ),
                 const SizedBox(height: 8),
-                OutlinedButton.icon(onPressed: () => setState(() => scanning = true), icon: const Icon(Icons.qr_code_scanner), label: const Text('สแกน QR Fallback')),
+                OutlinedButton.icon(
+                  onPressed: _openScanner,
+                  icon: const Icon(Icons.qr_code_scanner),
+                  label: const Text('สแกน QR Fallback'),
+                ),
               ],
             ),
           ),
@@ -233,18 +321,27 @@ class _PlayerPageState extends State<PlayerPage> {
                         foregroundColor: Colors.white,
                         title: const Text('สแกน QR'),
                         automaticallyImplyLeading: false,
-                        actions: [IconButton(onPressed: () => setState(() => scanning = false), icon: const Icon(Icons.close))],
+                        actions: [
+                          IconButton(
+                            onPressed: () => setState(() => scanning = false),
+                            icon: const Icon(Icons.close),
+                          ),
+                        ],
                       ),
                       Expanded(
                         child: MobileScanner(
                           onDetect: (capture) {
                             if (_scannerLocked) return;
-                            final values = capture.barcodes.map((b) => b.rawValue).whereType<String>();
+                            final values = capture.barcodes
+                                .map((barcode) => barcode.rawValue)
+                                .whereType<String>();
                             final raw = values.isEmpty ? null : values.first;
                             if (raw == null) return;
                             _scannerLocked = true;
                             _onQr(raw);
-                            Future<void>.delayed(const Duration(milliseconds: 700)).then((_) => _scannerLocked = false);
+                            Future<void>.delayed(
+                              const Duration(milliseconds: 700),
+                            ).then((_) => _scannerLocked = false);
                           },
                         ),
                       ),

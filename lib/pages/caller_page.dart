@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
+import '../domain/bingo_protocol.dart';
 import '../services/ggwave_service.dart';
 
 class CallerPage extends StatefulWidget {
@@ -20,6 +21,7 @@ class _CallerPageState extends State<CallerPage> {
   final List<int> called = <int>[];
   final Set<int> winners = <int>{};
   final Random _random = Random();
+  late final BingoEventGate _gate;
 
   StreamSubscription<Uint8List>? _sub;
   int seq = 0;
@@ -33,6 +35,7 @@ class _CallerPageState extends State<CallerPage> {
   @override
   void initState() {
     super.initState();
+    _gate = BingoEventGate(widget.gameId & 0xFF);
     _start();
   }
 
@@ -42,13 +45,19 @@ class _CallerPageState extends State<CallerPage> {
       await GgwaveService.setUltrasonicFreq(freq);
       await GgwaveService.startListening(proto);
       _sub = GgwaveService.onMessage.listen((payload) {
-        if (payload.length < 3 || payload[0] != (widget.gameId & 0xFF)) return;
-        if (payload[1] != 0xFF) return;
-        final pid = payload[2];
-        if (!mounted) return;
+        final result = _gate.accept(
+          BingoProtocolCodec.decodeAudio(payload),
+          source: BingoTransportSource.audio,
+        );
+        if (!result.accepted ||
+            result.event?.type != BingoEventType.winner ||
+            !mounted) {
+          return;
+        }
+        final playerId = result.event!.playerId!;
         setState(() {
-          winners.add(pid);
-          log = 'Player $pid ส่ง BINGO!';
+          winners.add(playerId);
+          log = 'Player $playerId ส่ง BINGO!';
         });
       });
     } catch (e) {
@@ -61,19 +70,23 @@ class _CallerPageState extends State<CallerPage> {
     setState(() => _busy = true);
     try {
       final available = <int>[
-        for (var n = 1; n <= 75; n++)
-          if (!called.contains(n)) n,
+        for (var number = 1; number <= 75; number++)
+          if (!called.contains(number)) number,
       ];
-      final n = available[_random.nextInt(available.length)];
-      called.add(n);
-      lastNum = n;
+      final number = available[_random.nextInt(available.length)];
+      called.add(number);
+      lastNum = number;
       seq = (seq + 1) & 0xFF;
       if (seq == 0) seq = 1;
 
       if (proto.isUltrasonic) {
         await GgwaveService.setUltrasonicFreq(freq);
       }
-      final payload = BingoProto.makeNumber(widget.gameId, n, seq);
+      final payload = BingoProtocolCodec.encodeNumber(
+        widget.gameId,
+        number,
+        seq,
+      );
       final wave = await GgwaveService.encode(
         payload,
         p: proto,
@@ -83,7 +96,7 @@ class _CallerPageState extends State<CallerPage> {
       if (!mounted) return;
       setState(() {
         showQr = true;
-        log = 'ส่งเลข $n • seq $seq • ${proto.label}';
+        log = 'ส่งเลข $number • seq $seq • ${proto.label}';
       });
     } catch (e) {
       if (mounted) setState(() => log = 'ส่งไม่สำเร็จ: $e');
@@ -125,28 +138,33 @@ class _CallerPageState extends State<CallerPage> {
                 children: [
                   Expanded(
                     child: DropdownButtonFormField<Protocol>(
-                      value: proto,
+                      initialValue: proto,
                       isExpanded: true,
                       decoration: const InputDecoration(
                         labelText: 'Protocol',
                         border: OutlineInputBorder(),
                       ),
                       items: Protocol.values
-                          .map((p) => DropdownMenuItem(value: p, child: Text(p.label)))
+                          .map(
+                            (p) => DropdownMenuItem(
+                              value: p,
+                              child: Text(p.label),
+                            ),
+                          )
                           .toList(),
                       onChanged: _changeProtocol,
                     ),
                   ),
                   const SizedBox(width: 12),
                   QrImageView(
-                    data: BingoProto.makeQrJoin(widget.gameId),
+                    data: BingoProtocolCodec.encodeQrJoin(widget.gameId),
                     size: 80,
                     backgroundColor: Colors.white,
                   ),
                 ],
               ),
               const SizedBox(height: 8),
-              const Text('QR ซ้ายบนคือ QR JOIN'),
+              const Text('QR ด้านขวาคือ QR JOIN'),
               if (proto.isUltrasonic) ...[
                 const SizedBox(height: 12),
                 Text('Ultrasonic start: ${freq.toStringAsFixed(0)} Hz'),
@@ -156,17 +174,34 @@ class _CallerPageState extends State<CallerPage> {
                   divisions: 110,
                   value: freq,
                   label: '${freq.toStringAsFixed(0)} Hz',
-                  onChanged: (v) => setState(() => freq = v),
-                  onChangeEnd: (v) => GgwaveService.setUltrasonicFreq(v),
+                  onChanged: (value) => setState(() => freq = value),
+                  onChangeEnd: GgwaveService.setUltrasonicFreq,
+                ),
+                Wrap(
+                  spacing: 8,
+                  children: [12000.0, 15000.0, 18000.0]
+                      .map(
+                        (value) => ActionChip(
+                          label: Text('${(value / 1000).toStringAsFixed(0)} kHz'),
+                          onPressed: () {
+                            setState(() => freq = value);
+                            GgwaveService.setUltrasonicFreq(value);
+                          },
+                        ),
+                      )
+                      .toList(),
                 ),
               ],
               const SizedBox(height: 12),
-              Text('เรียกแล้ว ${called.length}/75', style: Theme.of(context).textTheme.titleMedium),
+              Text(
+                'เรียกแล้ว ${called.length}/75',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
               const SizedBox(height: 8),
               Wrap(
                 spacing: 6,
                 runSpacing: 6,
-                children: called.map((n) => Chip(label: Text('$n'))).toList(),
+                children: called.map((number) => Chip(label: Text('$number'))).toList(),
               ),
               const SizedBox(height: 16),
               FilledButton.icon(
@@ -183,13 +218,17 @@ class _CallerPageState extends State<CallerPage> {
                     child: Column(
                       children: [
                         const Text(
-                          'QR Fallback - กรณีอยู่ไกลไม่ได้ยินเสียง',
+                          'QR Fallback - กรณีรับ acoustic packet ไม่ได้',
                           style: TextStyle(fontWeight: FontWeight.bold),
                           textAlign: TextAlign.center,
                         ),
                         const SizedBox(height: 10),
                         QrImageView(
-                          data: BingoProto.makeQrNumber(widget.gameId, lastNum!, seq),
+                          data: BingoProtocolCodec.encodeQrNumber(
+                            widget.gameId,
+                            lastNum!,
+                            seq,
+                          ),
                           size: 140,
                           backgroundColor: Colors.white,
                         ),
@@ -206,7 +245,13 @@ class _CallerPageState extends State<CallerPage> {
                 Text('Winners', style: Theme.of(context).textTheme.titleMedium),
                 Wrap(
                   spacing: 8,
-                  children: winners.map((pid) => Chip(label: Text('Player $pid 🏆'))).toList(),
+                  children: winners
+                      .map(
+                        (playerId) => Chip(
+                          label: Text('Player $playerId 🏆'),
+                        ),
+                      )
+                      .toList(),
                 ),
               ],
             ],

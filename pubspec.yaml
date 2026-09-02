@@ -1,0 +1,35 @@
+name: bingo_qr
+description: Hybrid Bingo over ggwave audio with QR fallback.
+version: 1.2.0
+publish_to: none
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+  flutter: '>=3.22.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ggwave_flutter:
+    git:
+      url: https://github.com/dexter-cnx/ggwave.git
+      ref: main
+      path: packages/ggwave_flutter
+  permission_handler: 11.3.0
+  qr_flutter: 4.1.0
+  mobile_scanner: 5.2.0
+
+dependency_overrides:
+  ggwave_dart:
+    git:
+      url: https://github.com/dexter-cnx/ggwave.git
+      ref: main
+      path: packages/ggwave_dart
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

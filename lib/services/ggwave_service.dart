@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-import 'package:ggwave_flutter/ggwave_flutter.dart';
+import 'package:ggwave_rs_flutter/ggwave_rs_flutter.dart';
 
 enum Protocol {
   audibleFast(1, false, 'Audible Fast', GgWaveProtocol.audibleFast),

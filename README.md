@@ -14,21 +14,13 @@ Flutter Bingo game using ggwave audio as the primary transport and QR as a fallb
 
 ## ggwave dependency
 
-This app consumes the packages maintained in https://github.com/dexter-cnx/ggwave rather than embedding a second copy of the Rust transport.
+This app consumes the universal packages maintained in https://github.com/dexter-cnx/ggwave rather than embedding a second copy of the Rust transport.
 
-Until `ggwave_dart` and `ggwave_flutter` are published to pub.dev, `pubspec.yaml` uses Git dependencies with package paths. After publication these can be replaced with normal `^1.2.0` dependencies.
+The Flutter package is named `ggwave_rs_flutter` because the pub.dev name `ggwave_flutter` is already owned by another project. Until `ggwave_dart` and `ggwave_rs_flutter` are published, `pubspec.yaml` consumes them from the ggwave monorepo via Git paths. After publication these can be replaced with normal `^1.2.0` dependencies.
 
 ## Run
 
 ```bash
-flutter pub get
-flutter run
-```
-
-If native platform boilerplate is missing after cloning, run:
-
-```bash
-flutter create --platforms=android,ios .
 flutter pub get
 flutter run
 ```
